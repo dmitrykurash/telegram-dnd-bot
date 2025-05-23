@@ -57,6 +57,20 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(msg.chat.id, `Я — D&D бот с чёрным юмором!\n\n/start — начать игру и выбрать тему\n/menu — меню\n/theme — сменить тему\n/continue — продолжить игру\n/status — статус игры\n/help — справка\n\nПиши свои действия текстом, упоминай других игроков через @username, и не бойся умереть — тут это весело!`);
 });
 
+bot.onText(/\/stop/, async (msg) => {
+  const state = await db.loadState(msg.chat.id) || {};
+  state.stopped = true;
+  await db.saveState(msg.chat.id, state);
+  bot.sendMessage(msg.chat.id, 'Бот остановлен. Чтобы продолжить игру, используйте /resume или /start.');
+});
+
+bot.onText(/\/resume/, async (msg) => {
+  const state = await db.loadState(msg.chat.id) || {};
+  state.stopped = false;
+  await db.saveState(msg.chat.id, state);
+  bot.sendMessage(msg.chat.id, 'Бот снова в деле! Можете продолжать игру.');
+});
+
 // Обработка inline-кнопок меню
 bot.on('callback_query', async (query) => {
   if (query.data === 'menu_theme') {

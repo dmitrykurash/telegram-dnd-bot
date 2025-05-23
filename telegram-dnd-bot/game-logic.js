@@ -96,25 +96,36 @@ function handlePlayerMessage(bot, msg, db, logger) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   db.loadState(chatId).then(async state => {
+    // 1. Не реагировать, если бот остановлен
+    if (state && state.stopped) return;
+
     if (!state || !state.theme || !state.step) return;
     if (deadPlayers[chatId] && deadPlayers[chatId][userId] && deadPlayers[chatId][userId] > state.step) {
       bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ты пока вне игры! Жди воскрешения.`);
       return;
     }
+
+    // 2. Только один ответ на шаг
+    stepResponded[chatId] = stepResponded[chatId] || {};
+    if (stepResponded[chatId][userId]) return;
+
     const mentions = extractMentions(msg.text || '');
     state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions, step: state.step });
     db.saveState(chatId, state);
     logger.info(`Ответ игрока ${msg.from.username}: ${msg.text}`);
 
-    // Саркастический комментарий к ответу
-    const commentPrompt = `Ты — ведущий максимально агрессивного и неприличного roast-style шоу, как комик на прожарке. Прокомментируй с жёстким сарказмом, чёрным юмором, обидно, агрессивно, иногда даже грубо, но не переходи на запрещённые темы. Не используй эмодзи, не используй *, **, _ и другие символы для выделения текста, не предлагай варианты ответов. Ответ должен быть не длиннее 300 символов. Очень редко можешь похвалить, но в основном — прожарь игрока. Вот действие игрока: "${msg.text}". Не повторяй сам ответ, а именно прокомментируй.`;
+    // 3. Прожарка с учетом упомянутых пользователей
+    let mentionText = '';
+    if (mentions.length > 0) {
+      mentionText = `В сообщении упомянуты: ${mentions.map(u => '@' + u).join(', ')}. Можешь прожарить их тоже.`;
+    }
+    const commentPrompt = `Ты — ведущий максимально агрессивного и неприличного roast-style шоу, как комик на прожарке. Прокомментируй с жёстким сарказмом, чёрным юмором, обидно, агрессивно, иногда даже грубо, но не переходи на запрещённые темы. Не используй эмодзи, не используй *, **, _ и другие символы для выделения текста, не предлагай варианты ответов. Ответ должен быть не длиннее 300 символов. Очень редко можешь похвалить, но в основном — прожарь игрока. Вот действие игрока: "${msg.text}". ${mentionText} Не повторяй сам ответ, а именно прокомментируй.`;
     const comment = await deepseek.askDeepSeek([
       { role: 'system', content: commentPrompt }
     ]);
     bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ${comment}`);
 
     // Отметить, что игрок ответил на этот шаг
-    stepResponded[chatId] = stepResponded[chatId] || {};
     stepResponded[chatId][userId] = true;
 
     // Проверить, все ли участники ответили (кроме бота)
