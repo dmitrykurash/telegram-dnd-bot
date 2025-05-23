@@ -62,7 +62,7 @@ function finishVoting(bot, chatId, db, logger) {
 }
 
 async function startFirstStep(bot, chatId, db, logger) {
-  const state = db.loadState(chatId);
+  const state = await db.loadState(chatId);
   if (!state || !state.theme) return;
   const themes = getAllThemes();
   const theme = themes.find(t => t.id === state.theme);
@@ -90,16 +90,17 @@ function extractMentions(text) {
 function handlePlayerMessage(bot, msg, db, logger) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const state = db.loadState(chatId);
-  if (!state || !state.theme || !state.step) return;
-  if (deadPlayers[chatId] && deadPlayers[chatId][userId] && deadPlayers[chatId][userId] > state.step) {
-    bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ты пока вне игры! Жди воскрешения.`);
-    return;
-  }
-  const mentions = extractMentions(msg.text || '');
-  state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions });
-  db.saveState(chatId, state);
-  logger.info(`Ответ игрока ${msg.from.username}: ${msg.text}`);
+  db.loadState(chatId).then(state => {
+    if (!state || !state.theme || !state.step) return;
+    if (deadPlayers[chatId] && deadPlayers[chatId][userId] && deadPlayers[chatId][userId] > state.step) {
+      bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ты пока вне игры! Жди воскрешения.`);
+      return;
+    }
+    const mentions = extractMentions(msg.text || '');
+    state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions });
+    db.saveState(chatId, state);
+    logger.info(`Ответ игрока ${msg.from.username}: ${msg.text}`);
+  });
 }
 
 function init(bot, db, logger) {
@@ -119,7 +120,7 @@ function init(bot, db, logger) {
 }
 
 async function nextStep(bot, chatId, db, logger) {
-  const state = db.loadState(chatId);
+  const state = await db.loadState(chatId);
   if (!state || !state.theme) return;
   const themes = getAllThemes();
   const theme = themes.find(t => t.id === state.theme);

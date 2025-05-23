@@ -38,8 +38,8 @@ bot.onText(/\/continue/, (msg) => {
   gameLogic.nextStep(bot, msg.chat.id, db, logger);
 });
 
-bot.onText(/\/status/, (msg) => {
-  const state = db.loadState(msg.chat.id);
+bot.onText(/\/status/, async (msg) => {
+  const state = await db.loadState(msg.chat.id);
   if (!state || !state.theme) {
     bot.sendMessage(msg.chat.id, 'Игра ещё не начата. Используйте /start.');
     return;
@@ -55,7 +55,7 @@ bot.onText(/\/help/, (msg) => {
 });
 
 // Обработка inline-кнопок меню
-bot.on('callback_query', (query) => {
+bot.on('callback_query', async (query) => {
   if (query.data === 'menu_theme') {
     gameLogic.startThemeVoting(bot, query.message.chat.id, db, logger);
     bot.answerCallbackQuery({ callback_query_id: query.id });
@@ -63,7 +63,7 @@ bot.on('callback_query', (query) => {
     gameLogic.nextStep(bot, query.message.chat.id, db, logger);
     bot.answerCallbackQuery({ callback_query_id: query.id });
   } else if (query.data === 'menu_status') {
-    const state = db.loadState(query.message.chat.id);
+    const state = await db.loadState(query.message.chat.id);
     if (!state || !state.theme) {
       bot.sendMessage(query.message.chat.id, 'Игра ещё не начата. Используйте /start.');
     } else {
