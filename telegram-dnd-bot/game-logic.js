@@ -5,6 +5,8 @@ const path = require('path');
 const THEMES_DIR = path.join(__dirname, 'themes');
 let activeVotes = {};
 let deadPlayers = {};
+let stepTimers = {};
+let stepResponded = {};
 
 function getAllThemes() {
   return fs.readdirSync(THEMES_DIR)
@@ -90,23 +92,115 @@ function extractMentions(text) {
 function handlePlayerMessage(bot, msg, db, logger) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  db.loadState(chatId).then(state => {
+  db.loadState(chatId).then(async state => {
     if (!state || !state.theme || !state.step) return;
     if (deadPlayers[chatId] && deadPlayers[chatId][userId] && deadPlayers[chatId][userId] > state.step) {
       bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ты пока вне игры! Жди воскрешения.`);
       return;
     }
     const mentions = extractMentions(msg.text || '');
-    state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions });
+    state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions, step: state.step });
     db.saveState(chatId, state);
     logger.info(`Ответ игрока ${msg.from.username}: ${msg.text}`);
+
+    // Саркастический комментарий к ответу
+    const commentPrompt = `Ты — ведущий D&D с чёрным юмором. Прокомментируй с сарказмом, чёрным юмором или похвалой следующее действие игрока: "${msg.text}". Не повторяй сам ответ, а именно прокомментируй.`;
+    const comment = await deepseek.askDeepSeek([
+      { role: 'system', content: commentPrompt }
+    ]);
+    bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ${comment}`);
+
+    // Отметить, что игрок ответил на этот шаг
+    stepResponded[chatId] = stepResponded[chatId] || {};
+    stepResponded[chatId][userId] = true;
+
+    // Проверить, все ли участники ответили (кроме бота)
+    const membersCount = await bot.getChatMembersCount(chatId);
+    const uniqueResponded = Object.keys(stepResponded[chatId] || {}).length;
+    if (uniqueResponded >= membersCount - 1) {
+      clearTimeout(stepTimers[chatId]);
+      await summarizeStep(bot, chatId, db, logger);
+    }
   });
 }
 
+async function summarizeStep(bot, chatId, db, logger) {
+  const state = await db.loadState(chatId);
+  const actions = state.history.filter(e => e.type === 'action' && e.step === state.step);
+  let summaryPrompt;
+  if (actions.length === 0) {
+    summaryPrompt = `Ты — ведущий D&D с чёрным юмором. Никто не сделал ничего в ответ на ситуацию. Подведи итог раунда с сарказмом и чёрным юмором, высмей бездействие.`;
+  } else {
+    const actionsText = actions.map(a => `@${a.username}: ${a.text}`).join('\n');
+    summaryPrompt = `Ты — ведущий D&D с чёрным юмором. Подведи итог действий игроков:\n${actionsText}\nДобавь сарказма, чёрного юмора, иногда похвали, но чаще поддразни. В конце напиши: 'Что же будет дальше — узнаете в следующем шаге.'`;
+  }
+  const summary = await deepseek.askDeepSeek([
+    { role: 'system', content: summaryPrompt }
+  ]);
+  bot.sendMessage(chatId, summary);
+  // Сбросить отметки ответивших
+  stepResponded[chatId] = {};
+}
+
 function init(bot, db, logger) {
+  // Приветствие при добавлении в группу
+  bot.on('new_chat_members', async (msg) => {
+    if (msg.new_chat_members.some(m => m.username === bot.me?.username)) {
+      // Собираем участников чата
+      let members = [msg.from.first_name];
+      if (msg.new_chat_members.length > 1) {
+        members = msg.new_chat_members.map(m => m.first_name || m.username || 'кто-то');
+      }
+      
+      const welcomePrompt = `Ты — ведущий D&D с чёрным юмором. Поприветствуй новых игроков: ${members.join(', ')}. 
+      Используй сарказм и чёрный юмор, намекни на возможную "смерть" персонажей, но оставайся дружелюбным. 
+      Сделай отсылку к D&D и настольным играм.
+      Добавь упоминание через @ для организатора группы: @${msg.from.username || msg.from.first_name}.
+      Ответ должен быть не длиннее 2-3 предложений.`;
+      
+      try {
+        const welcome = await deepseek.askDeepSeek([
+          { role: 'system', content: welcomePrompt }
+        ]);
+        
+        bot.sendMessage(msg.chat.id, 
+          `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${welcome}\n\n` +
+          `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы выбрать тему и начать страдать!`, 
+          { parse_mode: 'HTML' }
+        );
+      } catch (error) {
+        // Fallback на случай проблем с API
+        logger.error('Error generating welcome message:', error);
+        const fallbackJokes = [
+          `@${msg.from.username || msg.from.first_name}, ты теперь официально в игре, поздравляю, но не надейся на лёгкую жизнь!`,
+          `Вас тут много, но выживут не все. Особенно если будете слушать советы @${msg.from.username || msg.from.first_name}.`,
+          `Если кто-то думал, что это будет обычный D&D — вы ошиблись чатом. Тут даже кубики плачут.`,
+          `В этой игре можно умереть... от смеха. Или от тупости соседа.`,
+          `@${members.join(', @')}, добро пожаловать в клуб мазохистов!`
+        ];
+        bot.sendMessage(msg.chat.id, 
+          `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${fallbackJokes[Math.floor(Math.random()*fallbackJokes.length)]}\n\n` +
+          `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы выбрать тему и начать страдать!`, 
+          { parse_mode: 'HTML' }
+        );
+      }
+    }
+  });
+
   bot.on('callback_query', (query) => {
     if (query.data.startsWith('vote_theme_')) {
       handleVote(bot, query, db, logger);
+      // Проверка: если проголосовали все участники (кроме бота)
+      bot.getChatAdministrators(query.message.chat.id).then(admins => {
+        const adminIds = admins.map(a => a.user.id);
+        bot.getChatMembersCount(query.message.chat.id).then(count => {
+          const votes = activeVotes[query.message.chat.id]?.votes || {};
+          // -1 потому что бот тоже в чате
+          if (Object.keys(votes).length >= count - 1) {
+            finishVoting(bot, query.message.chat.id, db, logger);
+          }
+        });
+      });
     } else if (query.data === 'next_step') {
       nextStep(bot, query.message.chat.id, db, logger);
       bot.answerCallbackQuery({ callback_query_id: query.id, text: 'Следующий шаг!' });
@@ -156,6 +250,11 @@ async function nextStep(bot, chatId, db, logger) {
   bot.sendMessage(chatId, `${next}`, {
     reply_markup: { inline_keyboard: [[{ text: 'Следующий шаг', callback_data: 'next_step' }]] }
   });
+
+  // После отправки ситуации:
+  // Установить таймер на 30 минут для подведения итогов
+  clearTimeout(stepTimers[chatId]);
+  stepTimers[chatId] = setTimeout(() => summarizeStep(bot, chatId, db, logger), 30 * 60 * 1000);
 }
 
 module.exports = { init, startThemeVoting };
