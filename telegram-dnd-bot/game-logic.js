@@ -115,7 +115,7 @@ function handlePlayerMessage(bot, msg, db, logger) {
     stepResponded[chatId][userId] = true;
 
     // Проверить, все ли участники ответили (кроме бота)
-    const membersCount = await bot.getChatMembersCount(chatId);
+    const membersCount = await bot.getChatMemberCount(chatId);
     const uniqueResponded = Object.keys(stepResponded[chatId] || {}).length;
     if (uniqueResponded >= membersCount - 1) {
       clearTimeout(stepTimers[chatId]);
@@ -145,45 +145,49 @@ async function summarizeStep(bot, chatId, db, logger) {
 function init(bot, db, logger) {
   // Приветствие при добавлении в группу
   bot.on('new_chat_members', async (msg) => {
-    if (msg.new_chat_members.some(m => m.username === bot.me?.username)) {
-      // Собираем участников чата
-      let members = [msg.from.first_name];
-      if (msg.new_chat_members.length > 1) {
-        members = msg.new_chat_members.map(m => m.first_name || m.username || 'кто-то');
-      }
-      
-      const welcomePrompt = `Ты — ведущий D&D с чёрным юмором. Поприветствуй новых игроков: ${members.join(', ')}. 
-      Используй сарказм и чёрный юмор, намекни на возможную "смерть" персонажей, но оставайся дружелюбным. 
-      Сделай отсылку к D&D и настольным играм.
-      Добавь упоминание через @ для организатора группы: @${msg.from.username || msg.from.first_name}.
-      Ответ должен быть не длиннее 2-3 предложений.`;
-      
+    // Всегда приветствуем новых участников, если среди них есть не только бот
+    let members = msg.new_chat_members.map(m => m.first_name || m.username || 'кто-то');
+    if (members.length === 0) return;
+    const welcomePrompt = `Ты — ведущий D&D с чёрным юмором. Поприветствуй новых игроков: ${members.join(', ')}. 
+    Используй сарказм и чёрный юмор, намекни на возможную "смерть" персонажей, но оставайся дружелюбным. 
+    Сделай отсылку к D&D и настольным играм.
+    Добавь упоминание через @ для организатора группы: @${msg.from.username || msg.from.first_name}.
+    Ответ должен быть не длиннее 2-3 предложений.`;
+    try {
+      const welcome = await deepseek.askDeepSeek([
+        { role: 'system', content: welcomePrompt }
+      ]);
+      bot.sendMessage(msg.chat.id, 
+        `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${welcome}\n\n` +
+        `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы начать страдать!`, 
+        { parse_mode: 'HTML' }
+      );
+      // Отправить короткое описание игры
       try {
-        const welcome = await deepseek.askDeepSeek([
-          { role: 'system', content: welcomePrompt }
+        const aboutPrompt = `Ты — ведущий D&D с чёрным юмором. Кратко и простым языком (1-2 предложения) объясни новым игрокам, что ты ведущий, что будет происходить (игра, приключения, чёрный юмор, можно умереть, но весело), и что им нужно делать (писать свои действия, использовать /start). Не используй сложные слова, добавь сарказм.`;
+        const about = await deepseek.askDeepSeek([
+          { role: 'system', content: aboutPrompt }
         ]);
-        
-        bot.sendMessage(msg.chat.id, 
-          `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${welcome}\n\n` +
-          `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы выбрать тему и начать страдать!`, 
-          { parse_mode: 'HTML' }
-        );
-      } catch (error) {
-        // Fallback на случай проблем с API
-        logger.error('Error generating welcome message:', error);
-        const fallbackJokes = [
-          `@${msg.from.username || msg.from.first_name}, ты теперь официально в игре, поздравляю, но не надейся на лёгкую жизнь!`,
-          `Вас тут много, но выживут не все. Особенно если будете слушать советы @${msg.from.username || msg.from.first_name}.`,
-          `Если кто-то думал, что это будет обычный D&D — вы ошиблись чатом. Тут даже кубики плачут.`,
-          `В этой игре можно умереть... от смеха. Или от тупости соседа.`,
-          `@${members.join(', @')}, добро пожаловать в клуб мазохистов!`
-        ];
-        bot.sendMessage(msg.chat.id, 
-          `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${fallbackJokes[Math.floor(Math.random()*fallbackJokes.length)]}\n\n` +
-          `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы выбрать тему и начать страдать!`, 
-          { parse_mode: 'HTML' }
-        );
+        bot.sendMessage(msg.chat.id, about);
+      } catch (e) {
+        bot.sendMessage(msg.chat.id, 'Я ведущий этой D&D-игры. Буду придумывать вам приключения, шутить и иногда "убивать" персонажей. Просто пишите свои действия и не бойтесь умереть — тут это весело!');
       }
+    } catch (error) {
+      logger.error('Error generating welcome message:', error);
+      const fallbackJokes = [
+        `@${msg.from.username || msg.from.first_name}, ты теперь официально в игре, поздравляю, но не надейся на лёгкую жизнь!`,
+        `Вас тут много, но выживут не все. Особенно если будете слушать советы @${msg.from.username || msg.from.first_name}.`,
+        `Если кто-то думал, что это будет обычный D&D — вы ошиблись чатом. Тут даже кубики плачут.`,
+        `В этой игре можно умереть... от смеха. Или от тупости соседа.`,
+        `@${members.join(', @')}, добро пожаловать в клуб мазохистов!`
+      ];
+      bot.sendMessage(msg.chat.id, 
+        `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${fallbackJokes[Math.floor(Math.random()*fallbackJokes.length)]}\n\n` +
+        `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы начать страдать!`, 
+        { parse_mode: 'HTML' }
+      );
+      // Отправить короткое описание игры (fallback)
+      bot.sendMessage(msg.chat.id, 'Я ведущий этой D&D-игры. Буду придумывать вам приключения, шутить и иногда "убивать" персонажей. Просто пишите свои действия и не бойтесь умереть — тут это весело!');
     }
   });
 
@@ -193,7 +197,7 @@ function init(bot, db, logger) {
       // Проверка: если проголосовали все участники (кроме бота)
       bot.getChatAdministrators(query.message.chat.id).then(admins => {
         const adminIds = admins.map(a => a.user.id);
-        bot.getChatMembersCount(query.message.chat.id).then(count => {
+        bot.getChatMemberCount(query.message.chat.id).then(count => {
           const votes = activeVotes[query.message.chat.id]?.votes || {};
           // -1 потому что бот тоже в чате
           if (Object.keys(votes).length >= count - 1) {
@@ -257,4 +261,4 @@ async function nextStep(bot, chatId, db, logger) {
   stepTimers[chatId] = setTimeout(() => summarizeStep(bot, chatId, db, logger), 30 * 60 * 1000);
 }
 
-module.exports = { init, startThemeVoting };
+module.exports = { init, startThemeVoting, startFirstStep };

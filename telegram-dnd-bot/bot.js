@@ -13,8 +13,11 @@ const logger = winston.createLogger({
 });
 
 // Команды и обработчики
-bot.onText(/\/start/, (msg) => {
-  gameLogic.startThemeVoting(bot, msg.chat.id, db, logger);
+bot.onText(/\/start/, async (msg) => {
+  // Сбросить состояние и начать игру с темой "dungeons-python"
+  const defaultTheme = 'dungeons-python';
+  await db.saveState(msg.chat.id, { theme: defaultTheme, history: [], step: 0 });
+  gameLogic.startFirstStep(bot, msg.chat.id, db, logger);
 });
 
 bot.onText(/\/menu/, (msg) => {
