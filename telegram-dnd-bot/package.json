@@ -1,0 +1,28 @@
+{
+  "name": "telegram-dnd-bot",
+  "version": "1.0.0",
+  "description": "Telegram D&D Bot — ведущий с чёрным юмором, DeepSeek AI, хранение истории, автоматические сообщения.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "dnd",
+    "deepseek",
+    "game",
+    "ai"
+  ],
+  "author": "dmitry",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.5.0",
+    "moment-timezone": "^0.5.48",
+    "node-cron": "^4.0.7",
+    "node-telegram-bot-api": "^0.66.0",
+    "winston": "^3.17.0"
+  }
+}
