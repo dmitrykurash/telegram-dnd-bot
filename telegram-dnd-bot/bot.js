@@ -49,13 +49,14 @@ bot.onText(/\/menu/, (msg) => {
 
 // Обработка реплаев к ситуациям
 bot.on('message', (msg) => {
-  // Получить username бота
   bot.getMe().then(me => {
     const botUsernames = [me.username?.toLowerCase(), 'aslan', 'аслан', 'схема', 'shema'].filter(Boolean);
     const text = (msg.text || '').toLowerCase();
+    // Проверка на упоминание через entities
+    const hasMentionEntity = (msg.entities || []).some(e => e.type === 'mention' && msg.text?.toLowerCase().includes('@' + me.username?.toLowerCase()));
     // Если это реплай на сообщение бота (но не ситуация) или @упоминание бота
     const isReplyToBot = msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.id === bot.id;
-    const isMention = botUsernames.some(u => text.includes('@' + u) || text.includes(u));
+    const isMention = botUsernames.some(u => text.includes('@' + u) || text.includes(u)) || hasMentionEntity;
     if (isReplyToBot || isMention) {
       handlePersonalMention(bot, msg, db, logger);
       return;

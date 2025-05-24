@@ -99,9 +99,8 @@ async function handleMessage(bot, message, db, logger) {
       }
     } catch (e) { /* ignore */ }
 
-    // Если ответило хотя бы 3 разных человека — запускаем таймер на 2 минуты для итогов
-    const uniqueUsers = [...new Set(state.active_situation.responses.map(r => r.user_id))];
-    if (uniqueUsers.length === AUTO_SUMMARY_RESPONSES && !autoSummaryTimers[chatId]) {
+    // Если это первый ответ — запускаем таймер на 2 минуты для итогов (если ещё не был запущен)
+    if (state.active_situation.responses.length === 1 && !autoSummaryTimers[chatId]) {
       autoSummaryTimers[chatId] = setTimeout(async () => {
         await processSituationResults(bot, chatId, db, logger);
         delete autoSummaryTimers[chatId];
@@ -114,7 +113,7 @@ async function handleMessage(bot, message, db, logger) {
       const botId = (await bot.getMe()).id;
       const allMembers = await bot.getChatMembersCount(chatId);
       const realPlayers = allMembers - 1; // минус бот
-      if (uniqueUsers.length >= realPlayers && realPlayers > 0) {
+      if (state.active_situation.responses.length >= realPlayers && realPlayers > 0) {
         if (autoSummaryTimers[chatId]) {
           clearTimeout(autoSummaryTimers[chatId]);
           delete autoSummaryTimers[chatId];
@@ -168,17 +167,23 @@ async function handlePersonalMention(bot, message, db, logger) {
     }
   }
   await bot.replyTo(message, `${mentionText}${reply}`);
-  // Если вопрос явно связан с сюжетом — добавляем в историю синдиката
-  if (/деньг|синдикат|схем|проблем|сюжет|истори|дело|братва|враг|союзник|план/i.test(message.text)) {
-    state.history.push({
-      day: state.day,
-      event: `[Личный диалог с @${message.from.username || message.from.first_name}]: ${message.text} => ${reply}`,
-      player_decisions: [],
-      consequences: null,
-      timestamp: Date.now()
-    });
-    saveState(chatId, state, db);
-  }
+  // Новый подход: спрашиваем у DeepSeek, важно ли это обращение для сюжета
+  try {
+    const relevancePrompt = `Ты — Аслан "Схема". Пользователь написал: "${message.text}". Ответил ты: "${reply}". Скажи только "да" или "нет": важно ли это обращение для сюжета, героев, игроков или развития истории синдиката? Если хоть немного влияет — отвечай "да".`;
+    const relevance = await deepseek.askDeepSeek([
+      { role: 'user', content: relevancePrompt }
+    ]);
+    if (relevance.trim().toLowerCase().startsWith('да')) {
+      state.history.push({
+        day: state.day,
+        event: `[Личный диалог с @${message.from.username || message.from.first_name}]: ${message.text} => ${reply}`,
+        player_decisions: [],
+        consequences: null,
+        timestamp: Date.now()
+      });
+      saveState(chatId, state, db);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 // Обработка ситуации после сбора ответов
@@ -245,5 +250,7 @@ module.exports = {
   processSituationResults,
   showHistory,
   showRelationships,
-  gameState
+  gameState,
+  loadState,
+  saveState
 };

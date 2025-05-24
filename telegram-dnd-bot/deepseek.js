@@ -47,6 +47,11 @@ const ASLAN_SYSTEM_PROMPT = `Ты - Аслан "Схема", виртуальн�
 Оставайся в образе всегда
 `;
 
+function sanitizeBotText(text) {
+  // Удаляем все звёздочки (и двойные, и одиночные)
+  return text.replace(/\*/g, '');
+}
+
 async function askDeepSeek(messages) {
   try {
     // Всегда добавляем мастер-промпт первым
@@ -63,7 +68,8 @@ async function askDeepSeek(messages) {
         'Content-Type': 'application/json'
       }
     });
-    return response.data.choices[0].message.content;
+    // Фильтруем звёздочки
+    return sanitizeBotText(response.data.choices[0].message.content);
   } catch (error) {
     winston.error('DeepSeek API error:', error);
     return 'Ошибка связи с ИИ. Даже боги иногда молчат...';
