@@ -70,20 +70,36 @@ bot.on('message', (msg) => {
 // Автоматические ситуации (утро/вечер)
 const moment = require('moment-timezone');
 const cron = require('node-cron');
-cron.schedule('0 9 * * *', async () => {
-  // Для всех чатов, где есть активная игра
-  for (const chatId of Object.keys(gameLogic.gameState)) {
-    await gameLogic.createSituation(bot, chatId, db, logger, 'утро');
-  }
-}, { timezone: process.env.TIMEZONE || 'Europe/Moscow' });
-cron.schedule('0 19 * * *', async () => {
-  for (const chatId of Object.keys(gameLogic.gameState)) {
-    await gameLogic.createSituation(bot, chatId, db, logger, 'вечер');
-  }
+const CHECK_INTERVAL_MINUTES = 5;
+const SITUATION_DEADLINE_MINUTES = 35;
+
+// Хелпер для случайного времени в диапазоне минут
+function randomMinuteInRange(start, end) {
+  return start + Math.floor(Math.random() * (end - start + 1));
+}
+
+// Утреннее сообщение: случайное время между 10:00 и 10:15
+cron.schedule('0 10 * * *', async () => {
+  const delay = randomMinuteInRange(0, 15) * 60 * 1000;
+  setTimeout(async () => {
+    for (const chatId of Object.keys(gameLogic.gameState)) {
+      await gameLogic.createSituation(bot, chatId, db, logger, 'утро');
+    }
+  }, delay);
 }, { timezone: process.env.TIMEZONE || 'Europe/Moscow' });
 
-// Таймауты: раз в час проверяем дедлайны
-cron.schedule('0 * * * *', async () => {
+// Вечернее сообщение: случайное время между 19:00 и 19:15
+cron.schedule('0 19 * * *', async () => {
+  const delay = randomMinuteInRange(0, 15) * 60 * 1000;
+  setTimeout(async () => {
+    for (const chatId of Object.keys(gameLogic.gameState)) {
+      await gameLogic.createSituation(bot, chatId, db, logger, 'вечер');
+    }
+  }, delay);
+}, { timezone: process.env.TIMEZONE || 'Europe/Moscow' });
+
+// Проверка дедлайнов ситуаций каждые 5 минут
+cron.schedule(`*/${CHECK_INTERVAL_MINUTES} * * * *`, async () => {
   for (const chatId of Object.keys(gameLogic.gameState)) {
     const state = gameLogic.gameState[chatId];
     if (state.active_situation.deadline && moment().isAfter(moment(state.active_situation.deadline))) {

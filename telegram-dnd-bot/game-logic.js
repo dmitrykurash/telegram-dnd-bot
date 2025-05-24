@@ -5,6 +5,11 @@ const moment = require('moment-timezone');
 // Новая структура состояния для синдиката
 let gameState = {};
 
+const SITUATION_DEADLINE_MINUTES = 35;
+const AUTO_SUMMARY_RESPONSES = 3;
+const AUTO_SUMMARY_DELAY_MINUTES = 2;
+let autoSummaryTimers = {};
+
 function getDefaultState() {
   return {
     day: 1,
@@ -58,9 +63,14 @@ async function createSituation(bot, chatId, db, logger, timeOfDay) {
     message_id: msg.message_id,
     text: situationText,
     responses: [],
-    deadline: moment().add(2, 'hours').toISOString()
+    deadline: moment().add(SITUATION_DEADLINE_MINUTES, 'minutes').toISOString()
   };
   saveState(chatId, state, db);
+  // Сбросить авто-таймер для итогов
+  if (autoSummaryTimers[chatId]) {
+    clearTimeout(autoSummaryTimers[chatId]);
+    delete autoSummaryTimers[chatId];
+  }
 }
 
 // Сбор ответов игроков через реплай
@@ -77,6 +87,14 @@ async function handleMessage(bot, message, db, logger) {
     });
     saveState(chatId, state, db);
     bot.replyTo(message, `Э, ${message.from.first_name}, понял тэбя, брат! Интэрэсная идея... 🤔`);
+    // Если ответило хотя бы 3 разных человека — запускаем таймер на 5 минут для итогов
+    const uniqueUsers = [...new Set(state.active_situation.responses.map(r => r.user_id))];
+    if (uniqueUsers.length === AUTO_SUMMARY_RESPONSES && !autoSummaryTimers[chatId]) {
+      autoSummaryTimers[chatId] = setTimeout(async () => {
+        await processSituationResults(bot, chatId, db, logger);
+        delete autoSummaryTimers[chatId];
+      }, AUTO_SUMMARY_DELAY_MINUTES * 60 * 1000);
+    }
   }
 }
 
@@ -92,10 +110,17 @@ async function handlePersonalMention(bot, message, db, logger) {
     text: message.text,
     timestamp: Date.now()
   });
+  // Извлекаем упоминания
+  const mentionRegex = /@([a-zA-Z0-9_]+)/g;
+  const mentions = [];
+  let match;
+  while ((match = mentionRegex.exec(message.text)) !== null) {
+    mentions.push(match[1]);
+  }
   // Формируем контекст последних 5 сообщений диалога
   const dialogHistory = state.personal_dialogs[userId].slice(-5).map(d => (d.from === 'user' ? `Пользователь: ${d.text}` : `Аслан: ${d.text}`)).join('\n');
   // Генерируем ответ
-  const prompt = `Ты — Аслан "Схема". Пользователь обратился к тебе лично. Вот последние сообщения диалога:\n${dialogHistory}\n\nОтветь коротко, с юмором, в своём стиле. Если вопрос касается денег, схем, синдиката или сюжета — обязательно запомни это для будущих событий.`;
+  const prompt = `Ты — Аслан "Схема". Пользователь обратился к тебе лично. Вот последние сообщения диалога:\n${dialogHistory}\n\nВНИМАНИЕ:\n- Не используй описания действий в стиле *улыбается*, *щурится*, *почёсывает бороду* и т.п. Не пиши ничего в звёздочках, не описывай жесты, только речь!\n- Пиши как живой человек, будто ты реально в чате.\n- Если в сообщении есть @username, обязательно обращайся к этому человеку по тегу (@username) в своём ответе, чтобы все видели, кому ты отвечаешь.\n${mentions.length ? `В сообщении упомянуты: ${mentions.map(u => '@' + u).join(', ')}. Используй эти теги в ответе!` : ''}\n\nОтветь коротко, с юмором, в своём стиле. Если вопрос касается денег, схем, синдиката или сюжета — обязательно запомни это для будущих событий.`;
   const reply = await deepseek.askDeepSeek([
     { role: 'user', content: prompt }
   ]);
@@ -106,7 +131,16 @@ async function handlePersonalMention(bot, message, db, logger) {
     timestamp: Date.now()
   });
   saveState(chatId, state, db);
-  await bot.sendMessage(chatId, `@${message.from.username || message.from.first_name}, ${reply}`);
+  // Отвечаем через reply, а не через @username
+  let mentionText = '';
+  if (mentions.length) {
+    // Исключаем самого автора из списка тегов
+    const mentionTags = mentions.filter(u => u !== (message.from.username || '')).map(u => '@' + u);
+    if (mentionTags.length) {
+      mentionText = mentionTags.join(' ') + ' ';
+    }
+  }
+  await bot.replyTo(message, `${mentionText}${reply}`);
   // Если вопрос явно связан с сюжетом — добавляем в историю синдиката
   if (/деньг|синдикат|схем|проблем|сюжет|истори|дело|братва|враг|союзник|план/i.test(message.text)) {
     state.history.push({
@@ -122,6 +156,10 @@ async function handlePersonalMention(bot, message, db, logger) {
 
 // Обработка ситуации после сбора ответов
 async function processSituationResults(bot, chatId, db, logger) {
+  if (autoSummaryTimers[chatId]) {
+    clearTimeout(autoSummaryTimers[chatId]);
+    delete autoSummaryTimers[chatId];
+  }
   const state = await loadState(chatId, db);
   const responses = state.active_situation.responses;
   const context = {
