@@ -1,280 +1,184 @@
 const deepseek = require('./deepseek');
-const fs = require('fs');
-const path = require('path');
+const { ASLAN_SYSTEM_PROMPT } = require('./deepseek');
+const moment = require('moment-timezone');
 
-const THEMES_DIR = path.join(__dirname, 'themes');
-let activeVotes = {};
-let deadPlayers = {};
-let stepTimers = {};
-let stepResponded = {};
+// Новая структура состояния для синдиката
+let gameState = {};
 
-function getAllThemes() {
-  return fs.readdirSync(THEMES_DIR)
-    .filter(f => f.endsWith('.json'))
-    .map(f => {
-      const data = JSON.parse(fs.readFileSync(path.join(THEMES_DIR, f)));
-      return { id: f.replace('.json', ''), ...data };
+function getDefaultState() {
+  return {
+    day: 1,
+    money: 10000,
+    reputation: 5,
+    problems: [],
+    allies: {},
+    enemies: {},
+    history: [],
+    active_situation: {
+      message_id: null,
+      text: '',
+      responses: [],
+      deadline: null
+    },
+    personal_dialogs: {} // user_id: [{from, text, timestamp}]
+  };
+}
+
+function saveState(chatId, state, db) {
+  gameState[chatId] = state;
+  db.saveState(chatId, state);
+}
+
+async function loadState(chatId, db) {
+  if (gameState[chatId]) return gameState[chatId];
+  const state = await db.loadState(chatId);
+  if (state) gameState[chatId] = state;
+  return state || getDefaultState();
+}
+
+// Создание новой ситуации (утро/вечер)
+async function createSituation(bot, chatId, db, logger, timeOfDay) {
+  const state = await loadState(chatId, db);
+  // Контекст для генерации
+  const context = {
+    day: state.day,
+    recent_events: state.history.slice(-5),
+    ongoing_problems: state.problems,
+    relationships: {
+      allies: state.allies,
+      enemies: state.enemies
+    }
+  };
+  const prompt = `Создай новую ситуацию для дня ${state.day} (${timeOfDay}).\nУчти недавние события: ${JSON.stringify(context.recent_events)}\nТекущие проблемы: ${JSON.stringify(context.ongoing_problems)}\nСитуация должна логично вытекать из предыдущих решений. НЕ давай варианты ответов, только опиши ситуацию.`;
+  const situationText = await deepseek.askDeepSeek([
+    { role: 'user', content: prompt }
+  ]);
+  const msg = await bot.sendMessage(chatId, situationText);
+  state.active_situation = {
+    message_id: msg.message_id,
+    text: situationText,
+    responses: [],
+    deadline: moment().add(2, 'hours').toISOString()
+  };
+  saveState(chatId, state, db);
+}
+
+// Сбор ответов игроков через реплай
+async function handleMessage(bot, message, db, logger) {
+  if (message.reply_to_message && message.reply_to_message.from && message.reply_to_message.from.id === (await bot.getMe()).id) {
+    const chatId = message.chat.id;
+    const state = await loadState(chatId, db);
+    if (!state.active_situation || state.active_situation.message_id !== message.reply_to_message.message_id) return;
+    // Сохраняем ответ
+    state.active_situation.responses.push({
+      player_name: message.from.first_name,
+      user_id: message.from.id,
+      response: message.text
     });
+    saveState(chatId, state, db);
+    bot.replyTo(message, `Э, ${message.from.first_name}, понял тэбя, брат! Интэрэсная идея... 🤔`);
+  }
 }
 
-function startThemeVoting(bot, chatId, db, logger) {
-  const themes = getAllThemes();
-  const inlineKeyboard = themes.map((t, idx) => [{ text: t.name, callback_data: `vote_theme_${idx}` }]);
-  activeVotes[chatId] = { votes: {}, started: Date.now(), themes };
-  bot.sendMessage(chatId, 'Выберите тему для нового приключения! Голосуйте кнопками ниже. Если никто не проголосует за 30 минут — я выберу сам.', {
-    reply_markup: { inline_keyboard: inlineKeyboard }
+// Новый обработчик персональных обращений к Аслану
+async function handlePersonalMention(bot, message, db, logger) {
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const state = await loadState(chatId, db);
+  state.personal_dialogs[userId] = state.personal_dialogs[userId] || [];
+  // Добавляем сообщение пользователя в историю диалога
+  state.personal_dialogs[userId].push({
+    from: 'user',
+    text: message.text,
+    timestamp: Date.now()
   });
-  setTimeout(() => finishVoting(bot, chatId, db, logger), 30 * 60 * 1000);
-}
-
-function handleVote(bot, query, db, logger) {
-  const chatId = query.message.chat.id;
-  const userId = query.from.id;
-  if (!activeVotes[chatId]) return;
-  const idx = parseInt(query.data.replace('vote_theme_', ''));
-  activeVotes[chatId].votes[userId] = idx;
-  bot.answerCallbackQuery({ callback_query_id: query.id, text: `Голос учтён: ${activeVotes[chatId].themes[idx].name}` });
-}
-
-function finishVoting(bot, chatId, db, logger) {
-  const vote = activeVotes[chatId];
-  if (!vote) return;
-  const counts = {};
-  Object.values(vote.votes).forEach(idx => { counts[idx] = (counts[idx] || 0) + 1; });
-  let max = 0, leaders = [];
-  for (const idx in counts) {
-    if (counts[idx] > max) { max = counts[idx]; leaders = [idx]; }
-    else if (counts[idx] === max) { leaders.push(idx); }
-  }
-  let chosenIdx;
-  if (leaders.length === 0) {
-    chosenIdx = Math.floor(Math.random() * vote.themes.length);
-    logger.info('Никто не проголосовал, тема выбрана случайно');
-  } else if (leaders.length > 1) {
-    chosenIdx = parseInt(leaders[Math.floor(Math.random() * leaders.length)]);
-    logger.info('Ничья, тема выбрана случайно из лидеров');
-  } else {
-    chosenIdx = parseInt(leaders[0]);
-  }
-  const theme = vote.themes[chosenIdx];
-  db.saveState(chatId, { theme: theme.id, history: [], step: 0 });
-  bot.sendMessage(chatId, `Тема выбрана: <b>${theme.name}</b>\n\n${theme.intro}`, { parse_mode: 'HTML' });
-  startFirstStep(bot, chatId, db, logger);
-  delete activeVotes[chatId];
-}
-
-async function startFirstStep(bot, chatId, db, logger) {
-  const state = await db.loadState(chatId);
-  if (!state || !state.theme) return;
-  const themes = getAllThemes();
-  const theme = themes.find(t => t.id === state.theme);
-  let prompt;
-  if (theme.id === 'dungeons-python') {
-    prompt = `Ты — ведущий эпического путешествия во времени в Россию 90-х с чёрным юмором. Начни приключение для игроков: придумай необычную, угарную ситуацию, вдохновляйся реальными историями из 90-х, добавляй неожиданные повороты. Стиль D&D только в механике, не в мире. Не предлагай варианты ответов, не подсказывай игрокам, что делать. Не используй *, **, _ и другие символы для выделения текста. Просто обычный текст, не более 700 символов.`;
-  } else {
-    prompt = `Ты — ведущий D&D с чёрным юмором. Начни приключение во вселенной: ${theme.name}. Используй сарказм, чёрный юмор, немного пошлости, вовлеки игроков, придумай первую ситуацию, требующую решения. Не предлагай варианты ответов, не подсказывай игрокам, что делать. Не используй *, **, _ и другие символы для выделения текста. Просто обычный текст, не более 700 символов.`;
-  }
-  const intro = await deepseek.askDeepSeek([
-    { role: 'system', content: prompt }
+  // Формируем контекст последних 5 сообщений диалога
+  const dialogHistory = state.personal_dialogs[userId].slice(-5).map(d => (d.from === 'user' ? `Пользователь: ${d.text}` : `Аслан: ${d.text}`)).join('\n');
+  // Генерируем ответ
+  const prompt = `Ты — Аслан "Схема". Пользователь обратился к тебе лично. Вот последние сообщения диалога:\n${dialogHistory}\n\nОтветь коротко, с юмором, в своём стиле. Если вопрос касается денег, схем, синдиката или сюжета — обязательно запомни это для будущих событий.`;
+  const reply = await deepseek.askDeepSeek([
+    { role: 'user', content: prompt }
   ]);
-  state.history.push({ type: 'situation', text: intro });
-  state.step = 1;
-  db.saveState(chatId, state);
-  bot.sendMessage(chatId, `${intro}`);
-}
-
-function extractMentions(text) {
-  const regex = /@([a-zA-Z0-9_]+)/g;
-  let match, result = [];
-  while ((match = regex.exec(text)) !== null) {
-    result.push(match[1]);
-  }
-  return result;
-}
-
-function handlePlayerMessage(bot, msg, db, logger) {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  db.loadState(chatId).then(async state => {
-    // 1. Не реагировать, если бот остановлен
-    if (state && state.stopped) return;
-
-    if (!state || !state.theme || !state.step) return;
-    if (deadPlayers[chatId] && deadPlayers[chatId][userId] && deadPlayers[chatId][userId] > state.step) {
-      bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ты пока вне игры! Жди воскрешения.`);
-      return;
-    }
-
-    // 2. Только один ответ на шаг
-    stepResponded[chatId] = stepResponded[chatId] || {};
-    if (stepResponded[chatId][userId]) return;
-
-    const mentions = extractMentions(msg.text || '');
-    state.history.push({ type: 'action', user: userId, username: msg.from.username, text: msg.text, mentions, step: state.step });
-    db.saveState(chatId, state);
-    logger.info(`Ответ игрока ${msg.from.username}: ${msg.text}`);
-
-    // 3. Прожарка с учетом упомянутых пользователей
-    let mentionText = '';
-    if (mentions.length > 0) {
-      mentionText = `В сообщении упомянуты: ${mentions.map(u => '@' + u).join(', ')}. Можешь прожарить их тоже.`;
-    }
-    const commentPrompt = `Ты — ведущий максимально агрессивного и неприличного roast-style шоу, как комик на прожарке. Прокомментируй с жёстким сарказмом, чёрным юмором, обидно, агрессивно, иногда даже грубо, но не переходи на запрещённые темы. Не используй эмодзи, не используй *, **, _ и другие символы для выделения текста, не предлагай варианты ответов. Ответ должен быть не длиннее 300 символов. Очень редко можешь похвалить, но в основном — прожарь игрока. Вот действие игрока: "${msg.text}". ${mentionText} Не повторяй сам ответ, а именно прокомментируй.`;
-    const comment = await deepseek.askDeepSeek([
-      { role: 'system', content: commentPrompt }
-    ]);
-    bot.sendMessage(chatId, `@${msg.from.username || msg.from.first_name}, ${comment}`);
-
-    // Отметить, что игрок ответил на этот шаг
-    stepResponded[chatId][userId] = true;
-
-    // Проверить, все ли участники ответили (кроме бота)
-    const membersCount = await bot.getChatMemberCount(chatId);
-    const uniqueResponded = Object.keys(stepResponded[chatId] || {}).length;
-    if (uniqueResponded >= membersCount - 1) {
-      clearTimeout(stepTimers[chatId]);
-      await summarizeStep(bot, chatId, db, logger);
-    }
+  // Добавляем ответ Аслана в историю диалога
+  state.personal_dialogs[userId].push({
+    from: 'aslan',
+    text: reply,
+    timestamp: Date.now()
   });
+  saveState(chatId, state, db);
+  await bot.sendMessage(chatId, `@${message.from.username || message.from.first_name}, ${reply}`);
+  // Если вопрос явно связан с сюжетом — добавляем в историю синдиката
+  if (/деньг|синдикат|схем|проблем|сюжет|истори|дело|братва|враг|союзник|план/i.test(message.text)) {
+    state.history.push({
+      day: state.day,
+      event: `[Личный диалог с @${message.from.username || message.from.first_name}]: ${message.text} => ${reply}`,
+      player_decisions: [],
+      consequences: null,
+      timestamp: Date.now()
+    });
+    saveState(chatId, state, db);
+  }
 }
 
-async function summarizeStep(bot, chatId, db, logger) {
-  const state = await db.loadState(chatId);
-  const actions = state.history.filter(e => e.type === 'action' && e.step === state.step);
-  let summaryPrompt;
-  if (actions.length === 0) {
-    summaryPrompt = `Ты — ведущий D&D с чёрным юмором. Никто не сделал ничего в ответ на ситуацию. Подведи итог раунда с сарказмом и чёрным юмором, высмей бездействие.`;
-  } else {
-    const actionsText = actions.map(a => `@${a.username}: ${a.text}`).join('\n');
-    summaryPrompt = `Ты — ведущий D&D с чёрным юмором. Подведи итог действий игроков:\n${actionsText}\nДобавь сарказма, чёрного юмора, иногда похвали, но чаще поддразни. В конце напиши: 'Что же будет дальше — узнаете в следующем шаге.'`;
-  }
-  const summary = await deepseek.askDeepSeek([
-    { role: 'system', content: summaryPrompt }
+// Обработка ситуации после сбора ответов
+async function processSituationResults(bot, chatId, db, logger) {
+  const state = await loadState(chatId, db);
+  const responses = state.active_situation.responses;
+  const context = {
+    history: state.history.slice(-10),
+    current_state: {
+      money: state.money,
+      reputation: state.reputation,
+      problems: state.problems
+    },
+    player_responses: responses,
+    character: 'Аслан Схема'
+  };
+  const prompt = `Ты Аслан Схема. Вот текущая ситуация синдиката:\n${JSON.stringify(context)}\n\nИгроки предложили следующее:\n${responses.map(r => r.player_name + ': ' + r.response).join('\n')}\n\nСоздай развитие событий, учитывая ВСЕ предложения игроков. Помни предыдущие события и решения. Ответь с акцентом и юмором.`;
+  const resultText = await deepseek.askDeepSeek([
+    { role: 'user', content: prompt }
   ]);
-  bot.sendMessage(chatId, summary);
-  // Сбросить отметки ответивших
-  stepResponded[chatId] = {};
+  // Обновляем историю
+  state.history.push({
+    day: state.day,
+    event: resultText,
+    player_decisions: responses,
+    consequences: null,
+    timestamp: moment().toISOString()
+  });
+  // Сброс активной ситуации, переход к следующему дню
+  state.day += 1;
+  state.active_situation = {
+    message_id: null,
+    text: '',
+    responses: [],
+    deadline: null
+  };
+  saveState(chatId, state, db);
+  await bot.sendMessage(chatId, resultText);
 }
 
-function init(bot, db, logger) {
-  // Приветствие при добавлении в группу
-  bot.on('new_chat_members', async (msg) => {
-    // Всегда приветствуем новых участников, если среди них есть не только бот
-    let members = msg.new_chat_members.map(m => m.first_name || m.username || 'кто-то');
-    if (members.length === 0) return;
-    const welcomePrompt = `Ты — ведущий D&D с чёрным юмором. Поприветствуй новых игроков: ${members.join(', ')}. 
-    Используй сарказм и чёрный юмор, намекни на возможную "смерть" персонажей, но оставайся дружелюбным. 
-    Сделай отсылку к D&D и настольным играм.
-    Добавь упоминание через @ для организатора группы: @${msg.from.username || msg.from.first_name}.
-    Ответ должен быть не длиннее 2-3 предложений.`;
-    try {
-      const welcome = await deepseek.askDeepSeek([
-        { role: 'system', content: welcomePrompt }
-      ]);
-      bot.sendMessage(msg.chat.id, 
-        `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${welcome}\n\n` +
-        `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы начать страдать!`, 
-        { parse_mode: 'HTML' }
-      );
-      // Отправить короткое описание игры
-      try {
-        const aboutPrompt = `Ты — ведущий D&D с чёрным юмором. Кратко и простым языком (1-2 предложения) объясни новым игрокам, что ты ведущий, что будет происходить (игра, приключения, чёрный юмор, можно умереть, но весело), и что им нужно делать (писать свои действия, использовать /start). Не используй сложные слова, добавь сарказм.`;
-        const about = await deepseek.askDeepSeek([
-          { role: 'system', content: aboutPrompt }
-        ]);
-        bot.sendMessage(msg.chat.id, about);
-      } catch (e) {
-        bot.sendMessage(msg.chat.id, 'Я ведущий этой D&D-игры. Буду придумывать вам приключения, шутить и иногда "убивать" персонажей. Просто пишите свои действия и не бойтесь умереть — тут это весело!');
-      }
-    } catch (error) {
-      logger.error('Error generating welcome message:', error);
-      const fallbackJokes = [
-        `@${msg.from.username || msg.from.first_name}, ты теперь официально в игре, поздравляю, но не надейся на лёгкую жизнь!`,
-        `Вас тут много, но выживут не все. Особенно если будете слушать советы @${msg.from.username || msg.from.first_name}.`,
-        `Если кто-то думал, что это будет обычный D&D — вы ошиблись чатом. Тут даже кубики плачут.`,
-        `В этой игре можно умереть... от смеха. Или от тупости соседа.`,
-        `@${members.join(', @')}, добро пожаловать в клуб мазохистов!`
-      ];
-      bot.sendMessage(msg.chat.id, 
-        `\u{1F47B} <b>Я — ваш ведущий D&D с чёрным юмором!</b>\n\n${fallbackJokes[Math.floor(Math.random()*fallbackJokes.length)]}\n\n` +
-        `Готовьтесь к боли, сарказму и неожиданным поворотам. Пишите /start, чтобы начать страдать!`, 
-        { parse_mode: 'HTML' }
-      );
-      // Отправить короткое описание игры (fallback)
-      bot.sendMessage(msg.chat.id, 'Я ведущий этой D&D-игры. Буду придумывать вам приключения, шутить и иногда "убивать" персонажей. Просто пишите свои действия и не бойтесь умереть — тут это весело!');
-    }
-  });
-
-  bot.on('callback_query', (query) => {
-    if (query.data.startsWith('vote_theme_')) {
-      handleVote(bot, query, db, logger);
-      // Проверка: если проголосовали все участники (кроме бота)
-      bot.getChatAdministrators(query.message.chat.id).then(admins => {
-        const adminIds = admins.map(a => a.user.id);
-        bot.getChatMemberCount(query.message.chat.id).then(count => {
-          const votes = activeVotes[query.message.chat.id]?.votes || {};
-          // -1 потому что бот тоже в чате
-          if (Object.keys(votes).length >= count - 1) {
-            finishVoting(bot, query.message.chat.id, db, logger);
-          }
-        });
-      });
-    } else if (query.data === 'next_step') {
-      nextStep(bot, query.message.chat.id, db, logger);
-      bot.answerCallbackQuery({ callback_query_id: query.id, text: 'Следующий шаг!' });
-    }
-  });
-  bot.on('message', (msg) => {
-    if (msg.text && !msg.text.startsWith('/')) {
-      handlePlayerMessage(bot, msg, db, logger);
-    }
-  });
+// Команды истории и отношений
+async function showHistory(bot, message, db) {
+  const state = await loadState(message.chat.id, db);
+  const history = state.history.slice(-10).map(e => `День ${e.day}: ${e.event}`).join('\n');
+  await bot.sendMessage(message.chat.id, history || 'История пока пуста, брат.');
 }
 
-async function nextStep(bot, chatId, db, logger) {
-  const state = await db.loadState(chatId);
-  if (!state || !state.theme) return;
-  const themes = getAllThemes();
-  const theme = themes.find(t => t.id === state.theme);
-  let lastSituation = state.history.filter(e => e.type === 'situation').slice(-1)[0]?.text || '';
-  let lastActions = state.history.filter(e => e.type === 'action').map(e => e.text).join('\n');
-  const users = [...new Set(state.history.filter(e => e.type === 'action').map(e => e.user))];
-  let killUser = null;
-  if (users.length > 0 && Math.random() < 0.4) {
-    const alive = users.filter(u => !deadPlayers[chatId] || !deadPlayers[chatId][u] || deadPlayers[chatId][u] <= state.step);
-    if (alive.length > 0) {
-      killUser = alive[Math.floor(Math.random() * alive.length)];
-      deadPlayers[chatId] = deadPlayers[chatId] || {};
-      deadPlayers[chatId][killUser] = state.step + 2;
-    }
-  }
-  if (deadPlayers[chatId]) {
-    for (const [uid, until] of Object.entries(deadPlayers[chatId])) {
-      if (until <= state.step) delete deadPlayers[chatId][uid];
-    }
-  }
-  let killMsg = '';
-  if (killUser) {
-    const killed = state.history.find(e => e.user === killUser)?.username || 'один из игроков';
-    killMsg = `\nP.S. ${killed} временно выбывает из игры! Но не переживай, тебя скоро воскресит чёрный юмор.`;
-  }
-  let prompt;
-  if (theme.id === 'dungeons-python') {
-    prompt = `Ты — ведущий эпического путешествия во времени в Россию 90-х с чёрным юмором. Продолжи приключение: придумай необычную, угарную ситуацию, вдохновляйся реальными историями из 90-х, добавляй неожиданные повороты. Стиль D&D только в механике, не в мире. Последняя ситуация: ${lastSituation}\nОтветы игроков: ${lastActions}${killMsg}\nНе предлагай варианты ответов, не подсказывай игрокам, что делать. Не используй *, **, _ и другие символы для выделения текста. Просто обычный текст, не более 700 символов.`;
-  } else {
-    prompt = `Ты — ведущий D&D с чёрным юмором. Продолжи приключение во вселенной: ${theme.name}. Последняя ситуация: ${lastSituation}\nОтветы игроков: ${lastActions}${killMsg}\nСделай новый поворот, добавь юмора, язвительности, можешь "убить" кого-то на 1-2 хода, но потом вернуть. Не предлагай варианты ответов, не подсказывай игрокам, что делать. Не используй *, **, _ и другие символы для выделения текста. Просто обычный текст, не более 700 символов.`;
-  }
-  const next = await deepseek.askDeepSeek([
-    { role: 'system', content: prompt }
-  ]);
-  state.history.push({ type: 'situation', text: next });
-  state.step++;
-  db.saveState(chatId, state);
-  bot.sendMessage(chatId, `${next}`);
-  // После отправки ситуации:
-  // Установить таймер на 30 минут для подведения итогов
-  clearTimeout(stepTimers[chatId]);
-  stepTimers[chatId] = setTimeout(() => summarizeStep(bot, chatId, db, logger), 30 * 60 * 1000);
+async function showRelationships(bot, message, db) {
+  const state = await loadState(message.chat.id, db);
+  const allies = Object.keys(state.allies).length ? Object.keys(state.allies).join(', ') : 'нет союзников';
+  const enemies = Object.keys(state.enemies).length ? Object.keys(state.enemies).join(', ') : 'нет врагов';
+  await bot.sendMessage(message.chat.id, `Союзники: ${allies}\nВраги: ${enemies}`);
 }
 
-module.exports = { init, startThemeVoting, startFirstStep };
+module.exports = {
+  getDefaultState,
+  createSituation,
+  handleMessage,
+  handlePersonalMention,
+  processSituationResults,
+  showHistory,
+  showRelationships,
+  gameState
+};
