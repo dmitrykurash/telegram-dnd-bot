@@ -92,19 +92,26 @@ cron.schedule('0 * * * *', async () => {
   }
 }, { timezone: process.env.TIMEZONE || 'Europe/Moscow' });
 
+// Функция для отправки только одного приветствия (если DeepSeek вернул несколько)
+function sendSingleWelcome(bot, chatId, welcome) {
+  // Если DeepSeek вернул несколько вариантов через перевод строки или двойной перевод строки — берём только первый
+  let text = welcome.split(/\n\s*\n|\n|\r/)[0].trim();
+  // Если есть разделитель типа 'Или:' — берём только до него
+  text = text.split(/Или:/i)[0].trim();
+  bot.sendMessage(chatId, text);
+}
+
 // Приветствие при добавлении бота в группу
 bot.on('new_chat_members', async (msg) => {
   const botId = (await bot.getMe()).id;
   const isBotAdded = msg.new_chat_members.some(m => m.id === botId);
   if (isBotAdded) {
-    // Пробуем сгенерировать приветствие через DeepSeek
     let welcome;
     try {
       welcome = await askDeepSeek([
         { role: 'user', content: 'Ты — Аслан "Схема", виртуальный криминальный авторитет. Придумай очень короткое приветствие (1-2 предложения максимум) для группы, куда тебя только что добавили. Используй кавказский акцент, юмор, стиль: "братва", "валлах", "схемы", "деньги". Не повторяйся, вариативно.' }
       ]);
     } catch (e) {
-      // Фоллбэк — случайная заготовка
       const variants = [
         'Вай, здарова, братва! Теперь тут порядок будет, валлах.',
         'Ассаламу алейкум, дарагие! Аслан "Схема" на связи, деньги будут — не переживайте.',
@@ -114,7 +121,7 @@ bot.on('new_chat_members', async (msg) => {
       ];
       welcome = variants[Math.floor(Math.random() * variants.length)];
     }
-    bot.sendMessage(msg.chat.id, welcome);
+    sendSingleWelcome(bot, msg.chat.id, welcome);
   }
 });
 
@@ -125,7 +132,6 @@ bot.on('callback_query', async (query) => {
   } else if (query.data === 'menu_relationships') {
     await gameLogic.showRelationships(bot, query.message, db);
   } else if (query.data === 'menu_call_aslan') {
-    // Сначала приветствие через DeepSeek
     let welcome;
     try {
       welcome = await askDeepSeek([
@@ -141,8 +147,7 @@ bot.on('callback_query', async (query) => {
       ];
       welcome = variants[Math.floor(Math.random() * variants.length)];
     }
-    await bot.sendMessage(chatId, welcome);
-    // Затем генерируем новую ситуацию
+    sendSingleWelcome(bot, chatId, welcome);
     await gameLogic.createSituation(bot, chatId, db, logger, 'от Аслана');
   } else if (query.data === 'menu_status') {
     const state = await gameLogic.loadState(chatId, db);
@@ -154,7 +159,6 @@ bot.on('callback_query', async (query) => {
 });
 
 bot.onText(/\/callaslan/, async (msg) => {
-  // Сначала приветствие через DeepSeek
   let welcome;
   try {
     welcome = await askDeepSeek([
@@ -170,8 +174,7 @@ bot.onText(/\/callaslan/, async (msg) => {
     ];
     welcome = variants[Math.floor(Math.random() * variants.length)];
   }
-  await bot.sendMessage(msg.chat.id, welcome);
-  // Генерируем новую ситуацию
+  sendSingleWelcome(bot, msg.chat.id, welcome);
   await gameLogic.createSituation(bot, msg.chat.id, db, logger, 'от Аслана');
 });
 
