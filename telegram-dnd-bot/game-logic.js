@@ -87,7 +87,19 @@ async function handleMessage(bot, message, db, logger) {
     });
     saveState(chatId, state, db);
     bot.replyTo(message, `Э, ${message.from.first_name}, понял тэбя, брат! Интэрэсная идея... 🤔`);
-    // Если ответило хотя бы 3 разных человека — запускаем таймер на 5 минут для итогов
+
+    // Короткий комментарий от Аслана (1-2 предложения, иногда мнение)
+    try {
+      const commentPrompt = `Ты — Аслан "Схема". Коротко (1-2 предложения, не более 120 символов) прокомментируй ответ игрока: "${message.text}". Не повторяй сам ответ, просто выскажи мнение или пошути, иногда можешь промолчать. Не используй звёздочки, не описывай действия.`;
+      const comment = await deepseek.askDeepSeek([
+        { role: 'user', content: commentPrompt }
+      ]);
+      if (comment && comment.trim().length > 0 && Math.random() < 0.85) { // иногда промолчать
+        await bot.sendMessage(chatId, comment, { reply_to_message_id: message.message_id });
+      }
+    } catch (e) { /* ignore */ }
+
+    // Если ответило хотя бы 3 разных человека — запускаем таймер на 2 минуты для итогов
     const uniqueUsers = [...new Set(state.active_situation.responses.map(r => r.user_id))];
     if (uniqueUsers.length === AUTO_SUMMARY_RESPONSES && !autoSummaryTimers[chatId]) {
       autoSummaryTimers[chatId] = setTimeout(async () => {
@@ -95,6 +107,21 @@ async function handleMessage(bot, message, db, logger) {
         delete autoSummaryTimers[chatId];
       }, AUTO_SUMMARY_DELAY_MINUTES * 60 * 1000);
     }
+
+    // Если все участники (кроме бота) уже ответили — сразу подводим итог
+    try {
+      const members = await bot.getChatAdministrators(chatId);
+      const botId = (await bot.getMe()).id;
+      const allMembers = await bot.getChatMembersCount(chatId);
+      const realPlayers = allMembers - 1; // минус бот
+      if (uniqueUsers.length >= realPlayers && realPlayers > 0) {
+        if (autoSummaryTimers[chatId]) {
+          clearTimeout(autoSummaryTimers[chatId]);
+          delete autoSummaryTimers[chatId];
+        }
+        await processSituationResults(bot, chatId, db, logger);
+      }
+    } catch (e) { /* ignore */ }
   }
 }
 
